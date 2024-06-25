@@ -14,7 +14,8 @@ class SinusoidalPositionEmbedding(nn.Module):
         pe[:, 0::2] = torch.sin(position * wk)
         pe[:, 1::2] = torch.cos(position * wk)
 
-        self.pe = pe.unsqueeze(0)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
         
     def forward(self, x):
         return self.pe[:, :x.size(-1)]

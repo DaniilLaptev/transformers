@@ -4,18 +4,24 @@ import torch.nn as nn
 import math
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d, h):
+    def __init__(self, hidden_dim, attn_heads):
         super(MultiHeadAttention, self).__init__()
         
-        assert d % h == 0
+        assert hidden_dim % attn_heads == 0
         
-        self.d = d
-        self.h = h
-        self.r = d // h
-        self.wqs = nn.Parameter(torch.rand((h, 1, d, self.r)))
-        self.wks = nn.Parameter(torch.rand((h, 1, d, self.r)))
-        self.wvs = nn.Parameter(torch.rand((h, 1, d, self.r)))
-        self.wo  = nn.Parameter(torch.rand((d, d)))
+        self.hidden_dim = hidden_dim
+        self.attn_heads = attn_heads
+        self.r = hidden_dim // attn_heads
+        self.wqs = nn.Parameter(torch.rand((attn_heads, 1, hidden_dim, self.r)))
+        self.wks = nn.Parameter(torch.rand((attn_heads, 1, hidden_dim, self.r)))
+        self.wvs = nn.Parameter(torch.rand((attn_heads, 1, hidden_dim, self.r)))
+        self.wo  = nn.Parameter(torch.rand((hidden_dim, hidden_dim)))
+
+        self.layernorm = nn.LayerNorm(hidden_dim)
+        self.gelu = nn.GELU()
+
+        for w in [self.wqs, self.wks, self.wvs, self.wo]:
+            nn.init.xavier_uniform_(w)
         
     def forward(self, q, k, v, mask = None):
         
@@ -31,7 +37,7 @@ class MultiHeadAttention(nn.Module):
             logits = logits.masked_fill(mask == 0, 1e-10)
         
         score = torch.softmax(logits, dim = -1)
-        values = (score @ V).reshape(batch_size, -1, self.h * self.r)
-        output = values @ self.wo
+        values = (score @ V).reshape(batch_size, -1, self.attn_heads * self.r)
+        output = self.layernorm(self.gelu(values @ self.wo))
         
         return output

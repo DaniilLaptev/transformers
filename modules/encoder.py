@@ -10,13 +10,15 @@ class EncoderLayer(nn.Module):
         super(EncoderLayer, self).__init__()
         
         self.attention = MultiHeadAttention(hidden_dim, attn_heads)
-        self.linear = nn.Linear(hidden_dim, hidden_dim)
+        self.linear1 = nn.Linear(hidden_dim, hidden_dim)
+        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        self.gelu = nn.GELU()
         self.layernorm = nn.LayerNorm(hidden_dim)
         self.dropout = nn.Dropout1d(dropout)
         
     def forward(self, x):
-        x = self.layernorm(x + self.attention(x, x, x))
-        x = self.layernorm(x + self.dropout(self.linear(x)))
+        x = self.layernorm(x + self.dropout(self.attention(x, x, x)))
+        x = self.layernorm(x + self.linear2(self.gelu(self.linear1(x))))
         return x
 
 class Encoder(nn.Module):
@@ -36,6 +38,7 @@ class Encoder(nn.Module):
         self.te = nn.Embedding(vocab_size, hidden_dim)
         self.pe = SinusoidalPositionEmbedding(hidden_dim, context)
         # self.se = SegmentEmbedding(hidden_dim)
+        self.layernorm = nn.LayerNorm(hidden_dim)
         self.layers = nn.ModuleList([
             EncoderLayer(hidden_dim, attn_heads, dropout=dropout) 
             for _ in range(num_layers)
@@ -49,7 +52,7 @@ class Encoder(nn.Module):
             x = x.unsqueeze(0)
             return_squeezed = True
         
-        x = self.te(x) + self.pe(x)# + self.se(x)
+        x = self.layernorm(self.te(x) + self.pe(x))# + self.se(x)
         for layer in self.layers:
             x = layer(x)
             
