@@ -12,31 +12,26 @@ class MultiHeadAttention(nn.Module):
         self.d = d
         self.h = h
         self.r = d // h
-        self.wqs = nn.Parameter(torch.rand((h, d, self.r)))
-        self.wks = nn.Parameter(torch.rand((h, d, self.r)))
-        self.wvs = nn.Parameter(torch.rand((h, d, self.r)))
+        self.wqs = nn.Parameter(torch.rand((h, 1, d, self.r)))
+        self.wks = nn.Parameter(torch.rand((h, 1, d, self.r)))
+        self.wvs = nn.Parameter(torch.rand((h, 1, d, self.r)))
         self.wo  = nn.Parameter(torch.rand((d, d)))
         
     def forward(self, q, k, v, mask = None):
         
-        batch_size, n_tokens, _ = q.shape
+        batch_size = q.size(0)
         
-        q = q.unsqueeze(1)
-        k = k.unsqueeze(1)
-        v = v.unsqueeze(1)
+        Q = q @ self.wqs
+        K = k @ self.wks
+        V = v @ self.wvs
         
-        Q = torch.matmul(q, self.wqs)
-        K = torch.matmul(k, self.wks)
-        V = torch.matmul(v, self.wvs)
-        
-        logits = Q @ K.transpose(-2, -1) / math.sqrt(self.r)
+        logits = Q @ K.transpose(2, 3) / math.sqrt(self.r)
         
         if mask is not None:
             logits = logits.masked_fill(mask == 0, 1e-10)
         
-        logits = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.r)
         score = torch.softmax(logits, dim = -1)
-        values = torch.matmul(score, V).reshape(batch_size, n_tokens, self.h * self.r)
-        output = torch.matmul(values, self.wo)
+        values = (score @ V).reshape(batch_size, -1, self.h * self.r)
+        output = values @ self.wo
         
         return output
