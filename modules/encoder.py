@@ -6,21 +6,21 @@ from .embeddings import SinusoidalPositionEmbedding
 from .attention import MultiHeadAttention
 
 class EncoderLayer(nn.Module):
-    def __init__(self, hidden_dim, attn_heads, dropout = 0.5):
+    def __init__(self, hidden_dim, attn_heads, ff = 128, dropout = 0.1):
         super(EncoderLayer, self).__init__()
         
         self.attention = MultiHeadAttention(hidden_dim, attn_heads)
-        self.linear1 = nn.Linear(hidden_dim, hidden_dim)
-        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        self.linear1 = nn.Linear(hidden_dim, ff)
         self.gelu = nn.GELU()
+        self.linear2 = nn.Linear(ff, hidden_dim)
         self.layernorm = nn.LayerNorm(hidden_dim)
-        self.dropout = nn.Dropout1d(dropout)
+        self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
         x = self.layernorm(x + self.dropout(self.attention(x, x, x)))
         x = self.layernorm(x + self.linear2(self.gelu(self.linear1(x))))
-        return x
-
+        return self.dropout(x)
+        
 class Encoder(nn.Module):
     def __init__(
         self, 
@@ -28,7 +28,6 @@ class Encoder(nn.Module):
         num_layers = 1,
         attn_heads = 4,
         hidden_dim = 64,
-        dropout = 0.5,
         context = 128,
         ):
         super(Encoder, self).__init__()
@@ -40,10 +39,14 @@ class Encoder(nn.Module):
         # self.se = SegmentEmbedding(hidden_dim)
         self.layernorm = nn.LayerNorm(hidden_dim)
         self.layers = nn.ModuleList([
-            EncoderLayer(hidden_dim, attn_heads, dropout=dropout) 
+            EncoderLayer(hidden_dim, attn_heads) 
             for _ in range(num_layers)
         ])
         self.context = context
+        
+        for p in self.parameters():
+            if len(p.shape) > 1:
+                nn.init.xavier_normal_(p)
         
     def forward(self, x):
         
