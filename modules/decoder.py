@@ -71,44 +71,49 @@ class Decoder(nn.Module):
         return encoded['input_ids'], encoded['attention_mask']
     
     def decode(self, tokens):
-        return self.tokenizer.decode(tokens)
+        return [self.tokenizer.decode(token) for token in tokens]
 
-    def generate(self, prompt, max_new_tokens=10 , p : float = 0.7):
-
-        answer = ''
+    def generate(self, prompts, max_new_tokens=-1, p=0.7):
         
-        for i in range(max_new_tokens):
-            x, attn = self.encode(prompt + answer)
+        if isinstance(prompts, str):
+            prompts = [prompts]
+        
+        batch_size = len(prompts)
+        answers = [''] * batch_size
 
-            next_token_probs = self.forward(x, attn = attn)[0, -1, :]
+        if max_new_tokens == -1:
+            max_new_tokens = self.context
+        
+        for _ in range(max_new_tokens):
+            x, attn = self.encode([prompt + answer for prompt, answer in zip(prompts, answers)])
 
-            sorted_logits, sorted_indices = torch.sort(next_token_probs, descending=True)
-            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-
-            sorted_indices_to_remove = cumulative_probs > p
+            next_token_probs = self.forward(x, attn=attn)[:, -1, :]
             
-            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-            sorted_indices_to_remove[..., 0] = 0
+            for i in range(batch_size):
+                sorted_logits, sorted_indices = torch.sort(next_token_probs[i], descending=True)
+                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
 
-            indices_to_remove = sorted_indices[sorted_indices_to_remove]
+                sorted_indices_to_remove = cumulative_probs > p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
 
-            new_logits = torch.clone(next_token_probs)
-            new_logits[indices_to_remove] = float('-inf')
+                indices_to_remove = sorted_indices[sorted_indices_to_remove]
+                new_logits = next_token_probs[i].clone()
+                new_logits[indices_to_remove] = float('-inf')
 
-            scores = torch.softmax(new_logits, dim=-1)
-            id = torch.multinomial(scores, num_samples=1).item()
-            
-            # convert to token and add new token to text
-            answer += self.decode(id)
-            
-            if self.tokenizer.eos_token_id == id:
-                break
+                scores = torch.softmax(new_logits, dim=-1)
+                id = torch.multinomial(scores, num_samples=1).item()
 
-        return answer
+                answers[i] += self.decode([id])[0]
+
+                if self.tokenizer.eos_token_id == id:
+                    break
+    
+        return answers if batch_size > 1 else answers[0]
         
     def forward(self, x, attn = None, memory = None, mask = None):
         
-        if isinstance(x, str):
+        if isinstance(x, (str, list)):
             x, attn = self.encode(x)
         
         if len(x.shape) == 1:
@@ -125,5 +130,7 @@ class Decoder(nn.Module):
             
         for layer in self.layers:
             x = layer(x, memory, mask)
+        
+        x = self.linear(x)
         
         return x
