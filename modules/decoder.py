@@ -19,15 +19,15 @@ class DecoderLayer(nn.Module):
         self.layernorm2 = nn.LayerNorm(hidden_dim)
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, e, x, mask):
-        x = self.layernorm1(x + self.attention(e, e, x, mask))
+    def forward(self, x, memory, mask):
+        x = self.layernorm1(x + self.attention(memory, memory, x, mask))
         x = self.layernorm2(x + self.linear2(self.gelu(self.linear1(x))))
         return self.dropout(x)
 
 class Decoder(nn.Module):
     def __init__(
         self, 
-        vocab_size,
+        tokenizer,
         num_layers = 1, 
         attn_heads = 4, 
         hidden_dim = 64,
@@ -39,39 +39,91 @@ class Decoder(nn.Module):
         
         self.hidden_dim = hidden_dim
         self.attn_heads = attn_heads
-        self.te = nn.Embedding(vocab_size, hidden_dim)
-        self.pe = SinusoidalPositionEmbedding(hidden_dim, context)
-        self.linear = nn.Linear(hidden_dim, vocab_size)
+        self.tokenizer = tokenizer
+        self.te = nn.Embedding(tokenizer.vocab_size, hidden_dim)
+        self.pe = SinusoidalPositionEmbedding(context, hidden_dim)
+        self.linear = nn.Linear(hidden_dim, tokenizer.vocab_size)
         self.layers = nn.ModuleList([
             DecoderLayer(hidden_dim, attn_heads, context, dropout) 
             for _ in range(num_layers)
         ])
-        
+        self.context = context
         self.mask_type = mask_type
-        self.mask = self._get_mask(mask_type)
         
-    def _get_mask(self, mask_type):
+    def _get_mask(self, x, attn):
         
-        mask = torch.ones(self.context, self.context)
+        seqlen = x.shape[1]
         
-        if mask_type == 'none':
-            return mask
-        if mask_type == 'causal':
-            return torch.triu(mask).bool()
+        mask = torch.ones(seqlen, seqlen)
         
-    def forward(self, x, e = None):
+        if attn is not None:
+            attn = torch.repeat_interleave(attn, seqlen, dim = -1).reshape(-1, seqlen, seqlen)
+        else:
+            attn = 1
         
-        return_squeezed = False
+        if self.mask_type == 'none':
+            return attn * mask
+        if self.mask_type == 'causal':
+            return attn * (torch.tril(mask) == 1)
+        
+    def encode(self, texts):
+        encoded = self.tokenizer(texts, padding = True, return_tensors='pt')
+        return encoded['input_ids'], encoded['attention_mask']
+    
+    def decode(self, tokens):
+        return self.tokenizer.decode(tokens)
+
+    def generate(self, prompt, max_new_tokens=10 , p : float = 0.7):
+
+        answer = ''
+        
+        for i in range(max_new_tokens):
+            x, attn = self.encode(prompt + answer)
+
+            next_token_probs = self.forward(x, attn = attn)[0, -1, :]
+
+            sorted_logits, sorted_indices = torch.sort(next_token_probs, descending=True)
+            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+
+            sorted_indices_to_remove = cumulative_probs > p
+            
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
+
+            indices_to_remove = sorted_indices[sorted_indices_to_remove]
+
+            new_logits = torch.clone(next_token_probs)
+            new_logits[indices_to_remove] = float('-inf')
+
+            scores = torch.softmax(new_logits, dim=-1)
+            id = torch.multinomial(scores, num_samples=1).item()
+            
+            # convert to token and add new token to text
+            answer += self.decode(id)
+            
+            if self.tokenizer.eos_token_id == id:
+                break
+
+        return answer
+        
+    def forward(self, x, attn = None, memory = None, mask = None):
+        
+        if isinstance(x, str):
+            x, attn = self.encode(x)
+        
         if len(x.shape) == 1:
             x = x.unsqueeze(0)
-            return_squeezed = True
+            attn = attn.unsqueeze(0)
             
-        if e is None:
-            e = x
+        if mask is None:
+            mask = self._get_mask(x, attn)
         
         x = self.te(x)
-        for layer in self.layers:
-            x = layer(x, e, self.causal_mask)
-        logits = self.linear(x)
         
-        return logits.squeeze(0) if return_squeezed else logits
+        if memory is None:
+            memory = x
+            
+        for layer in self.layers:
+            x = layer(x, memory, mask)
+        
+        return x
