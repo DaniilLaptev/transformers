@@ -4,11 +4,11 @@ __all__ = [
     'DecoderLayer',
     'Encoder',
     'EncoderLayer',
-    'MultiHeadAttention',
+    'MultiheadSelfAttention',
     'EncoderForSequenceClassification',
 ]
 
-from .attention import MultiHeadAttention
+from .attention import MultiheadSelfAttention
 from .encoder import EncoderLayer, Encoder, EncoderForSequenceClassification
 from .decoder import DecoderLayer, Decoder
 

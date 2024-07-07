@@ -1,50 +1,44 @@
-
 import torch
 import torch.nn as nn
 import math
-class MultiHeadAttention(nn.Module):
-    def __init__(self, hidden_dim, attn_heads, dropout = 0.1, attn_dropout = 0.0):
-        """Multi-head attention layer with optional mask.
 
-        Parameters
-        ----------
-        hidden_dim : int
-            Number of dimension of hidden representations.
-        attn_heads : int
-            Number of attention heads.
-        dropout : float, optional
-            Probability of dropout applied to output, by default 0.1
-        """
-        super(MultiHeadAttention, self).__init__()
+class MultiheadSelfAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        assert config.hidden_dim % config.attn_heads == 0
         
-        assert hidden_dim % attn_heads == 0
+        self.attn = nn.Linear(config.hidden_dim, 3 * config.hidden_dim)
+        self.linear = nn.Linear(config.hidden_dim, config.hidden_dim)
         
-        self.hidden_dim = hidden_dim
-        self.attn_heads = attn_heads
-        self.r = hidden_dim // attn_heads
+        self.attn_heads = config.attn_heads
+        self.hidden_dim = config.hidden_dim
         
-        self.wqs = nn.Linear(hidden_dim, attn_heads)
-        self.wks = nn.Linear(hidden_dim, attn_heads)
-        self.wvs = nn.Linear(hidden_dim, hidden_dim)
-        self.wo  = nn.Linear(hidden_dim, hidden_dim)
-        self.mask_dropout = nn.Dropout(attn_dropout)
-        self.dropout = nn.Dropout(dropout)
-        
-    def forward(self, q, k, v, mask = None):
-        
-        batch_size = q.size(0)
-        
-        Q = self.wqs(q)
-        K = self.wks(k)
-        V = self.wvs(v)
+        self.register_buffer('bias', self._get_mask(config))
+         
+    def _get_mask(self, config):
+        context = config.context
+        if config.mask_type == 'causal':
+            return torch.tril(torch.ones(context, context)).view(1, 1, context, context)
+        else:
+            raise NotImplementedError(f'Mask type {config.mask_type} is not implemented.')
     
-        logits = Q @ K.transpose(-2, -1) / math.sqrt(self.r)
+    def forward(self, x):
+        B, T, C = x.size()
         
-        if mask is not None:
-            logits = logits.masked_fill(mask == 0, 1e-10)
+        qkv = self.attn(x)
+        q, k, v = qkv.split(self.hidden_dim, dim=2)
         
-        score = torch.softmax(logits, dim = -1)
-        values = (score @ V).reshape(batch_size, -1, self.attn_heads * self.r)
-        output = self.dropout(self.wo(values))
+        # We transform q, k, v to have shape [B, num heads, T, head size]:
+        q = q.view(B, T, self.attn_heads, C // self.attn_heads).transpose(1, 2)
+        k = k.view(B, T, self.attn_heads, C // self.attn_heads).transpose(1, 2) 
+        v = v.view(B, T, self.attn_heads, C // self.attn_heads).transpose(1, 2)
         
-        return output
+        # Logits will have shape [B, num heads, T, T]
+        logits = q @ k.transpose(-2, -1) * (1 / math.sqrt(k.size(-1)))
+        logits = logits.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        
+        out = logits.softmax(dim=-1) @ v # [B, num heads, T, head size]
+        out = out.transpose(1, 2).contiguous().view(B, T, C)
+        out = self.linear(out)
+        
+        return out

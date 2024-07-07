@@ -1,136 +1,77 @@
-
 import torch
 import torch.nn as nn
 
-from .attention import MultiHeadAttention
-from .embeddings import SinusoidalPositionEmbedding
+from .attention import MultiheadSelfAttention
 
-class DecoderLayer(nn.Module):
-    def __init__(self, hidden_dim, attn_heads, ff = 128, dropout = 0.1):
-        super(DecoderLayer, self).__init__()
-        
-        self.hidden_dim = hidden_dim
-        self.attn_heads = attn_heads
-        self.attention = MultiHeadAttention(hidden_dim, attn_heads)
-        self.layernorm1 = nn.LayerNorm(hidden_dim)
-        self.linear1 = nn.Linear(hidden_dim, ff)
+class MLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.linear1 = nn.Linear(config.hidden_dim, config.mlp_hidden)
         self.gelu = nn.GELU()
-        self.linear2 = nn.Linear(ff, hidden_dim)
-        self.layernorm2 = nn.LayerNorm(hidden_dim)
-        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(config.mlp_hidden, config.hidden_dim)
+    
+    def forward(self, x):
+        x = self.linear2(self.gelu(self.linear1(x)))
+        return x
+    
+class DecoderLayer(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(config.hidden_dim)
+        self.attn = MultiheadSelfAttention(config)
+        self.ln2 = nn.LayerNorm(config.hidden_dim)
+        self.mlp = MLP(config)
         
-    def forward(self, x, memory, mask):
-        x = self.layernorm1(x + self.attention(memory, memory, x, mask))
-        x = self.layernorm2(x + self.linear2(self.gelu(self.linear1(x))))
-        return self.dropout(x)
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.mlp(self.ln2(x))
+        return x
 
 class Decoder(nn.Module):
-    def __init__(
-        self, 
-        tokenizer,
-        num_layers = 1, 
-        attn_heads = 4, 
-        hidden_dim = 64,
-        dropout = 0.5,
-        context = 128,
-        mask_type = 'causal'
-        ):
-        super(Decoder, self).__init__()
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.eos_token_id = config.eos_token_id
         
-        self.hidden_dim = hidden_dim
-        self.attn_heads = attn_heads
-        self.tokenizer = tokenizer
-        self.te = nn.Embedding(tokenizer.vocab_size, hidden_dim)
-        self.pe = SinusoidalPositionEmbedding(context, hidden_dim)
-        self.linear = nn.Linear(hidden_dim, tokenizer.vocab_size)
-        self.layers = nn.ModuleList([
-            DecoderLayer(hidden_dim, attn_heads, context, dropout) 
-            for _ in range(num_layers)
-        ])
-        self.context = context
-        self.mask_type = mask_type
+        self.te = nn.Embedding(config.vocab_size, config.hidden_dim)
+        self.pe = nn.Embedding(config.context, config.hidden_dim)
+        self.layers = nn.ModuleList([DecoderLayer(config) for _ in range(config.num_layers)])
+        self.ln = nn.LayerNorm(config.hidden_dim)
+        self.lmhead = nn.Linear(config.hidden_dim, config.vocab_size, bias=False)
         
-    def _get_mask(self, x, attn):
+        self.te.weight = self.lmhead.weight
         
-        seqlen = x.shape[1]
+    def forward(self, idx):
+        B, T = idx.size()
+        assert T <= self.config.context
         
-        mask = torch.ones(seqlen, seqlen)
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        x = self.pe(pos) + self.te(idx)
         
-        if attn is not None:
-            attn = torch.repeat_interleave(attn, seqlen, dim = -1).reshape(-1, seqlen, seqlen)
-        else:
-            attn = 1
+        for block in self.layers:
+            x = block(x)
+        x = self.ln(x)
         
-        if self.mask_type == 'none':
-            return attn * mask
-        if self.mask_type == 'causal':
-            return attn * (torch.tril(mask) == 1)
-        
-    def encode(self, texts):
-        encoded = self.tokenizer(texts, padding = True, return_tensors='pt')
-        return encoded['input_ids'], encoded['attention_mask']
+        logits = self.lmhead(x)
+        return logits
     
-    def decode(self, tokens):
-        return [self.tokenizer.decode(token) for token in tokens]
+    def generate(self, inp, max_new_tokens = 10, topk = 50):
+        answ = inp.clone()
+        B, T = answ.size()
 
-    def generate(self, prompts, max_new_tokens=-1, p=0.7):
-        
-        if isinstance(prompts, str):
-            prompts = [prompts]
-        
-        batch_size = len(prompts)
-        answers = [''] * batch_size
-
-        if max_new_tokens == -1:
-            max_new_tokens = self.context
-        
-        for _ in range(max_new_tokens):
-            x, attn = self.encode([prompt + answer for prompt, answer in zip(prompts, answers)])
-
-            next_token_probs = self.forward(x, attn=attn)[:, -1, :]
-            
-            for i in range(batch_size):
-                sorted_logits, sorted_indices = torch.sort(next_token_probs[i], descending=True)
-                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-
-                sorted_indices_to_remove = cumulative_probs > p
-                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0
-
-                indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                new_logits = next_token_probs[i].clone()
-                new_logits[indices_to_remove] = float('-inf')
-
-                scores = torch.softmax(new_logits, dim=-1)
-                id = torch.multinomial(scores, num_samples=1).item()
-
-                answers[i] += self.decode([id])[0]
-
-                if self.tokenizer.eos_token_id == id:
+        while answ.size(1) < T + max_new_tokens:
+            with torch.no_grad():
+                logits = self.forward(answ)[:,-1,:]
+                probs = logits.softmax(dim=-1)
+                topk_p, topk_idx = torch.topk(probs, topk, dim=-1)
+                idx = torch.multinomial(topk_p, 1)
+                xcol = torch.gather(topk_idx, -1, idx)
+                answ = torch.cat([answ, xcol], dim=-1)
+                
+                if sum(answ[:,-1] == self.eos_token_id) == B:
                     break
-    
-        return answers if batch_size > 1 else answers[0]
         
-    def forward(self, x, attn = None, memory = None, mask = None):
-        
-        if isinstance(x, (str, list)):
-            x, attn = self.encode(x)
-        
-        if len(x.shape) == 1:
-            x = x.unsqueeze(0)
-            attn = attn.unsqueeze(0)
-            
-        if mask is None:
-            mask = self._get_mask(x, attn)
-        
-        x = self.te(x)
-        
-        if memory is None:
-            memory = x
-            
-        for layer in self.layers:
-            x = layer(x, memory, mask)
-        
-        x = self.linear(x)
-        
-        return x
+        return {
+            'input': inp,
+            'answer': answ[:, T:]
+        }

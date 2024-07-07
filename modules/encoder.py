@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 from .embeddings import SinusoidalPositionEmbedding
-from .attention import MultiHeadAttention
+from .attention import MultiheadSelfAttention
 
 class EncoderLayer(nn.Module):
     def __init__(self, hidden_dim, attn_heads, ff = 128, dropout = 0.1):
