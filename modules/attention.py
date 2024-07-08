@@ -10,8 +10,8 @@ class MultiheadSelfAttention(nn.Module):
         self.attn = nn.Linear(config.hidden_dim, 3 * config.hidden_dim)
         self.linear = nn.Linear(config.hidden_dim, config.hidden_dim)
         
-        self.attn_heads = config.attn_heads
         self.hidden_dim = config.hidden_dim
+        self.attn_heads = config.attn_heads
         
         self.register_buffer('bias', self._get_mask(config))
          
@@ -27,7 +27,6 @@ class MultiheadSelfAttention(nn.Module):
         
         qkv = self.attn(x)
         q, k, v = qkv.split(self.hidden_dim, dim=2)
-        
         # We transform q, k, v to have shape [B, num heads, T, head size]:
         q = q.view(B, T, self.attn_heads, C // self.attn_heads).transpose(1, 2)
         k = k.view(B, T, self.attn_heads, C // self.attn_heads).transpose(1, 2) 
