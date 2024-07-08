@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+from collections import OrderedDict
+
 from .attention import MultiheadSelfAttention
 
 class MLP(nn.Module):
@@ -33,20 +35,39 @@ class Decoder(nn.Module):
         self.config = config
         self.eos_token_id = config.eos_token_id
         
-        self.te = nn.Embedding(config.vocab_size, config.hidden_dim)
+        if config.lora_embed:
+            self.te = nn.Sequential(OrderedDict(
+                emb = nn.Embedding(config.vocab_size, config.reduced_dim),
+                prj = nn.Linear(config.reduced_dim, config.hidden_dim, bias = False)
+            ))
+        else:
+            self.te = nn.Embedding(config.vocab_size, config.hidden_dim)
+        
         self.pe = nn.Embedding(config.context, config.hidden_dim)
         self.layers = nn.ModuleList([DecoderLayer(config) for _ in range(config.num_layers)])
         self.ln = nn.LayerNorm(config.hidden_dim)
-        self.lmhead = nn.Linear(config.hidden_dim, config.vocab_size, bias=False)
         
-        self.te.weight = self.lmhead.weight
+        if config.lora_embed:
+            self.lmhead = nn.Sequential(OrderedDict(
+                prj = nn.Linear(config.hidden_dim, config.reduced_dim, bias = False),
+                emb = nn.Linear(config.reduced_dim, config.vocab_size, bias = False),
+            ))
+            self.te.emb.weight = self.lmhead.emb.weight
+            # self.te.prj.weight = self.lmhead.prj.weight
+        else:
+            self.lmhead = nn.Linear(config.hidden_dim, config.vocab_size, bias = False)
+            self.te.weight = self.lmhead.weight
+        
+        self.is_lora = config.lora_embed
         
     def forward(self, idx):
         B, T = idx.size()
         assert T <= self.config.context
         
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
-        x = self.pe(pos) + self.te(idx)
+        pe = self.pe(pos)
+        te = self.te(idx)
+        x = pe + te
         
         for block in self.layers:
             x = block(x)
